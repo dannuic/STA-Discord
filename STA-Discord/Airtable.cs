@@ -68,6 +68,38 @@ namespace STA_Discord
             }
         }
 
+        public async Task<Record> Update(string table, string id, List<(string field, string content)> entries)
+        {
+            Fields fields = new Fields();
+            foreach (var entry in entries) {
+                fields.AddField(entry.field, entry.content);
+            }
+
+            AirtableCreateUpdateReplaceRecordResponse response = await _base.UpdateRecord(table, fields, id, true);
+
+            if (!response.Success)
+            {
+                if (response.AirtableApiError is AirtableApiException)
+                {
+                    Log.Error("Failed to update fields [{fields}] in table {table} with id {id} with error {message}",
+                        string.Join(", ", entries.Select(entry => string.Join(" -> ", entry.field, entry.content))),
+                        table, id, response.AirtableApiError.ErrorMessage);
+                }
+                else
+                {
+                    Log.Error("Failed to update fields [{fields}] in table {table} with id {id} with unknown error",
+                        string.Join(", ", entries.Select(entry => string.Join(" -> ", entry.field, entry.content))),
+                        table, id);
+                }
+
+                return null;
+            }
+            else
+            {
+                return new Record(response.Record);
+            }
+        }
+
         public class Record
         {
             private AirtableRecord _record;
@@ -81,6 +113,16 @@ namespace STA_Discord
             {
                 var result = _record.GetField(key);
                 return result is null ? def : (T)result;
+            }
+
+            public object Get(string key)
+            {
+                return _record.GetField(key);
+            }
+
+            public string Id()
+            {
+                return _record.Id;
             }
         }
     }
