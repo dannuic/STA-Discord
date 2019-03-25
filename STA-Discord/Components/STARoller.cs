@@ -51,11 +51,7 @@ namespace STA_Discord.Components
                 comment = sta_match.Groups["comment"].Value.Trim();
             }
 
-            if ((separator == "char" || separator == "sta") && comment == string.Empty)
-            {
-                await m.Channel.SendMessageAsync($"{m.Author.Mention} -- Please enter a character name.");
-            }
-            else if (separator == "player" && comment != string.Empty)
+            if (separator == "player" && comment != string.Empty)
             {
                 var discord_id = m.Author.ToString();
 
@@ -144,11 +140,27 @@ namespace STA_Discord.Components
 
                 try
                 {
-                    var character_stats = (await Airtable.Get("Characters", new List<string> {
-                        "Character Name",
+                    var characters = (await Airtable.Get("Characters", new List<string> {
+                        "Character Name", "Active Player",
                         "Control", "Fitness", "Presence", "Daring", "Insight", "Reason",
                         "Command", "Security", "Science", "Conn", "Engineering", "Medicine"
-                    })).Single(r => r.Get<string>("Character Name", "").ToLower().Contains(comment.ToLower()));
+                    }));
+
+                    var player = (await Airtable.Get("Players", new List<string> {
+                        "Player Name", "Discord", "Active Character"
+                    })).Single(r => r.Get<string>("Discord", "") == m.Author.ToString());
+
+                    string active_player(Airtable.Record record) {
+                        var current_player_id = record.Get<JArray>("Active Player", new JArray()).FirstOrDefault();
+                        if (current_player_id != null)
+                            return current_player_id.Value<string>();
+                        else
+                            return "";
+                    }
+
+                    var character_stats = characters.Single(r =>
+                        comment != string.Empty ? r.Get<string>("Character Name", "").ToLower().Contains(comment.ToLower()) :
+                        active_player(r) == player.Id());
 
                     var target_number = character_stats.Get<long>(attribute, 7) + character_stats.Get<long>(discipline, 1);
 
@@ -168,7 +180,7 @@ namespace STA_Discord.Components
                     await m.Channel.SendMessageAsync($"{m.Author.Mention} -- Rolls {rolls.Count()} d20's " +
                         $"using attribute **{attribute}** and discipline **{discipline}** " +
                         $"for character: **{character_stats.Get<string>("Character Name", "No One?")}** with a target of **{target_number}**\n\n" +
-                        $"***{(successes >= difficulty ? "SUCCESS!" : "F A I L U R E ...")}**\n\n*" +
+                        $"***{(successes >= difficulty ? "SUCCESS!" : "F A I L U R E ...")}***\n\n" +
                         $"  **{successes}** successes out of difficulty of **{difficulty}**\n" +
                         $"  **{momentum}** momentum generated\n" +
                         $"  **{complications}** complications with a complication range of **{complication_range} - 20**\n" +
@@ -178,7 +190,7 @@ namespace STA_Discord.Components
                 {
                     Log.Warning($"Caught exception \"{e.Message}\" when trying to access character stats");
 
-                    await m.Channel.SendMessageAsync($"{m.Author.Mention} -- could not find exactly one character that matches \"{comment}\"");
+                    await m.Channel.SendMessageAsync($"{m.Author.Mention} -- no character is associated with this discord or could not find exactly one character that matches \"{comment}\"");
                 }
             }
             else if (separator == "eff")
