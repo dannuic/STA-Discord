@@ -14,7 +14,7 @@ namespace STA_Discord.Components
     class STARoller : IComponent
     {
         public static Regex diceregex = new Regex(@"^(?<numdice>\d*)(?<dsides>(?<separator>[d|D|o|O|u|U])(?<numsides>\d+))(?<modifier>(?<sign>[\+\-])(?<addend>\d*))?(?<floor>(?<floorseperator>[f|F])(?<floorlimit>(?<floorsign>[\+\-])?(?<floorlimiter>\d*)))?(?<ceiling>(?<ceilingseperator>[c|C])(?<ceilinglimit>(?<ceilingsign>[\+\-])?(?<ceilinglimiter>\d*)))?$");
-        public static Regex sta_dice_regex = new Regex(@"^(?<numdice>\d*)(?<separator>(?i:player|char|sta|eff))\s*(?<comment>.*)$");
+        public static Regex sta_dice_regex = new Regex(@"^(?<numdice>\d*)(?<separator>(?i:player|char|sta|eff|cur))\s*(?<comment>.*)$");
 
         public string Name => "Star Trek Adventures Dice";
         public List<string> Commands => new List<string> { "sta", "eff" }; // this could be in a config...
@@ -83,23 +83,28 @@ namespace STA_Discord.Components
             }
             else if (separator == "player")
             {
-                await m.Channel.SendMessageAsync($"{m.Author.Mention} -- Please enter a player name.");
+                try
+                {
+                    var player = await current_player(m);
+                    await m.Channel.SendMessageAsync($"{m.Author.Mention} is associated with player {player.Get<string>("Player Name", "No One")}");
+                }
+                catch (InvalidOperationException e)
+                {
+                    await m.Channel.SendMessageAsync($"{m.Author.Mention} -- is not associated with a player.");
+                }
             }
             else if (separator == "char" && comment != String.Empty)
             {
-                var discord_id = m.Author.ToString();
-
                 try
                 {
-                    var player = (await Airtable.Get("Players", new List<string> {
-                        "Player Name", "Discord", "Active Character"
-                    })).Single(r => r.Get<string>("Discord", "") == discord_id);
-
+                    var player = await current_player(m);
                     var character = (await Airtable.Get("Characters", new List<string> {
                         "Character Name", "Active Player"
                     })).Single(r => r.Get<string>("Character Name", "").ToLower().Contains(comment.ToLower()));
 
-                    if (player.Get<JArray>("Active Character", new JArray()).First().Value<string>() != character.Id())
+                    var current_character = player.Get<JArray>("Active Character", new JArray()).FirstOrDefault();
+
+                    if (current_character == null || current_character.Value<string>() != character.Id())
                     {
                         var updated_player = await Airtable.Update("Players", player.Id(), new List<(string, string)> {
                             ("Active Character", character.Id())
@@ -122,12 +127,24 @@ namespace STA_Discord.Components
                 {
                     Log.Warning($"Caught exception \"{e.Message}\" when trying to access player and records");
 
-                    await m.Channel.SendMessageAsync($"{m.Author.Mention} -- could not find exactly one character that matches \"{comment}\" or player that matches discord \"{discord_id}\"");
+                    await m.Channel.SendMessageAsync($"{m.Author.Mention} -- could not find exactly one character that matches \"{comment}\" or player that matches discord \"{m.Author.ToString()}\"");
                 }
             }
             else if (separator == "char")
             {
-                await m.Channel.SendMessageAsync($"{m.Author.Mention} -- Please enter a character name.");
+                try
+                {
+                    var player = await current_player(m);
+                    var character = (await Airtable.Get("Characters", new List<string> {
+                        "Character Name", "Active Player"
+                    })).Single(r => is_character(r, player, comment));
+
+                    await m.Channel.SendMessageAsync($"{m.Author.Mention} is associated with character {character.Get<string>("Character Name", "No One")}");
+                }
+                catch (InvalidOperationException e)
+                {
+                    await m.Channel.SendMessageAsync($"{m.Author.Mention} -- is not associated with a character.");
+                }
             }
             else if (separator == "sta")
             {
@@ -140,27 +157,12 @@ namespace STA_Discord.Components
 
                 try
                 {
-                    var characters = (await Airtable.Get("Characters", new List<string> {
+                    var player = await current_player(m);
+                    var character_stats = (await Airtable.Get("Characters", new List<string> {
                         "Character Name", "Active Player",
                         "Control", "Fitness", "Presence", "Daring", "Insight", "Reason",
                         "Command", "Security", "Science", "Conn", "Engineering", "Medicine"
-                    }));
-
-                    var player = (await Airtable.Get("Players", new List<string> {
-                        "Player Name", "Discord", "Active Character"
-                    })).Single(r => r.Get<string>("Discord", "") == m.Author.ToString());
-
-                    string active_player(Airtable.Record record) {
-                        var current_player_id = record.Get<JArray>("Active Player", new JArray()).FirstOrDefault();
-                        if (current_player_id != null)
-                            return current_player_id.Value<string>();
-                        else
-                            return "";
-                    }
-
-                    var character_stats = characters.Single(r =>
-                        comment != string.Empty ? r.Get<string>("Character Name", "").ToLower().Contains(comment.ToLower()) :
-                        active_player(r) == player.Id());
+                    })).Single(r => is_character(r, player, comment));
 
                     var target_number = character_stats.Get<long>(attribute, 7) + character_stats.Get<long>(discipline, 1);
 
@@ -210,6 +212,60 @@ namespace STA_Discord.Components
                     $"**{count}** is the result\n" +
                     $"**{effects}** effects are generated\n" +
                     $"Results: `[ {string.Join(" ", rolls)} ]`");
+            }
+            else if (separator == "cur")
+            {
+                var roll_targets = (await Airtable.Get("Roll Targets")).OrderByDescending(rec => rec.Get<long>("Index", 0)).First();
+                var momentum = roll_targets.Get<long>("Momentum", 0);
+                var threat = roll_targets.Get<long>("Threat", 0);
+
+                await m.Channel.SendMessageAsync($"Momentum: **{momentum}** -- Threat: **{threat}**");
+
+                try
+                {
+                    var player = await current_player(m);
+                    var character = (await Airtable.Get("Characters", new List<string> {
+                        "Character Name", "Active Player", "Determination"
+                    })).Single(r => is_character(r, player, comment));
+
+                    await m.Channel.SendMessageAsync($"Determination for {character.Get<string>("Character Name", "No One")}: **{character.Get<long>("Determination", 0)}**");
+                }
+                catch (InvalidOperationException e)
+                {
+                    Log.Warning($"Caught exception \"{e.Message}\" when trying to access character determination");
+
+                    await m.Channel.SendMessageAsync($"{m.Author.Mention} -- could not determine determination for specified character");
+                }
+            }
+        }
+
+        private bool is_character(Airtable.Record character_record, Airtable.Record player_record, string comment)
+        {
+            string active_player(Airtable.Record record)
+            {
+                var current_player_id = record.Get<JArray>("Active Player", new JArray()).FirstOrDefault();
+                if (current_player_id != null)
+                    return current_player_id.Value<string>();
+                else
+                    return "";
+            }
+
+            return comment != string.Empty ? character_record.Get<string>("Character Name", "").ToLower().Contains(comment.ToLower()) :
+                (player_record != null && active_player(character_record) == player_record.Id());
+        }
+
+        private async Task<Airtable.Record> current_player(SocketMessage m)
+        {
+            try
+            {
+                return (await Airtable.Get("Players", new List<string> {
+                    "Player Name", "Discord", "Active Character"
+                })).Single(r => r.Get<string>("Discord", "") == m.Author.ToString());
+            }
+            catch (InvalidOperationException e)
+            {
+                Log.Warning($"Caught exception \"{e.Message}\" when trying to access player from discord");
+                return null;
             }
         }
     }
