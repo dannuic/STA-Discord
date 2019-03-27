@@ -14,7 +14,7 @@ namespace STA_Discord.Components
     class STARoller : IComponent
     {
         public static Regex diceregex = new Regex(@"^(?<numdice>\d*)(?<dsides>(?<separator>[d|D|o|O|u|U])(?<numsides>\d+))(?<modifier>(?<sign>[\+\-])(?<addend>\d*))?(?<floor>(?<floorseperator>[f|F])(?<floorlimit>(?<floorsign>[\+\-])?(?<floorlimiter>\d*)))?(?<ceiling>(?<ceilingseperator>[c|C])(?<ceilinglimit>(?<ceilingsign>[\+\-])?(?<ceilinglimiter>\d*)))?$");
-        public static Regex sta_dice_regex = new Regex(@"^(?<numdice>\d*)(?<separator>(?i:player|char|sta|eff|cur))\s*(?<comment>.*)$");
+        public static Regex sta_dice_regex = new Regex(@"^(?<numdice>\d*)(?<separator>(?i:player|char|sta|assist|eff|cur))\s*(?<comment>.*)$");
 
         public string Name => "Star Trek Adventures Dice";
         public List<string> Commands => new List<string> { "sta", "eff" }; // this could be in a config...
@@ -148,15 +148,67 @@ namespace STA_Discord.Components
             }
             else if (separator == "sta")
             {
-                var roll_targets = (await Airtable.Get("Roll Targets")).OrderByDescending(rec => rec.Get<long>("Index", 0)).First();
-                var complication_range = roll_targets.Get<long>("Complication Range", 20);
-                var difficulty = roll_targets.Get<long>("Difficulty", 1);
-                var focused = roll_targets.Get<bool>("Focused", false);
-                var attribute = roll_targets.Get<string>("Attribute", "");
-                var discipline = roll_targets.Get<string>("Discipline", "");
-
                 try
                 {
+                    var roll_targets = (await Airtable.Get("Roll Targets")).OrderByDescending(rec => rec.Get<long>("Index", 0)).First();
+                    var complication_range = roll_targets.Get<long>("Complication Range", 20);
+                    var difficulty = roll_targets.Get<long>("Difficulty", 1);
+                    var focused = roll_targets.Get<bool>("Focused", false);
+                    var attribute = roll_targets.Get<string>("Attribute", "");
+                    var discipline = roll_targets.Get<string>("Discipline", "");
+                    var assists = roll_targets.Get<long>("Assists", 0);
+
+                    var player = await current_player(m);
+                    var character_stats = (await Airtable.Get("Characters", new List<string> {
+                        "Character Name", "Active Player",
+                        "Control", "Fitness", "Presence", "Daring", "Insight", "Reason",
+                        "Command", "Security", "Science", "Conn", "Engineering", "Medicine"
+                    })).Single(r => is_character(r, player, comment));
+
+                    var target_number = character_stats.Get<long>(attribute, 7) + character_stats.Get<long>(discipline, 1);
+
+                    var rolls = Enumerable.Range(0, num_dice).Select(i => Dice.Roll(20)).OrderBy(r => r).ToList();
+
+                    var successes = rolls.Aggregate(0, (agg, item) =>
+                    {
+                        if (item == 1 || (item <= target_number && (bool)focused)) return agg + 2;
+                        else if (item <= target_number) return agg + 1;
+                        else return agg;
+                    }) + (int)assists;
+
+                    var momentum = successes > difficulty ? successes - difficulty : 0;
+
+                    var complications = rolls.Where(roll => roll >= complication_range).Count();
+
+                    await Airtable.Update("Roll Targets", roll_targets.Id(), new List<(string, string)> { ("Assists", "0") });
+
+                    await m.Channel.SendMessageAsync($"{m.Author.Mention} -- Rolls {rolls.Count()} d20's " +
+                        $"using attribute **{attribute}** and discipline **{discipline}** " +
+                        $"for character: **{character_stats.Get<string>("Character Name", "No One?")}** with a target of **{target_number}**\n\n" +
+                        $"***{(successes >= difficulty ? "SUCCESS!" : "F A I L U R E ...")}***\n\n" +
+                        $"  **{successes}** __*[{successes - assists}+{assists}]*__ successes out of difficulty of **{difficulty}**\n" +
+                        $"  **{momentum}** momentum generated\n" +
+                        $"  **{complications}** complications with a complication range of **{complication_range} - 20**\n" +
+                        $"Results: `[ {string.Join(" ", rolls)} ]`");
+                }
+                catch (InvalidOperationException e)
+                {
+                    Log.Warning($"Caught exception \"{e.Message}\" when trying to access character stats");
+
+                    await m.Channel.SendMessageAsync($"{m.Author.Mention} -- no character is associated with this discord or could not find exactly one character that matches \"{comment}\"");
+                }
+            }
+            else if (separator == "assist")
+            {
+                try
+                {
+                    var roll_targets = (await Airtable.Get("Roll Targets")).OrderByDescending(rec => rec.Get<long>("Index", 0)).First();
+                    var complication_range = roll_targets.Get<long>("Complication Range", 20);
+                    var focused = roll_targets.Get<bool>("Focused", false);
+                    var attribute = roll_targets.Get<string>("Attribute", "");
+                    var discipline = roll_targets.Get<string>("Discipline", "");
+                    var assists = roll_targets.Get<long>("Assists", 0);
+
                     var player = await current_player(m);
                     var character_stats = (await Airtable.Get("Characters", new List<string> {
                         "Character Name", "Active Player",
@@ -175,16 +227,15 @@ namespace STA_Discord.Components
                         else return agg;
                     });
 
-                    var momentum = successes > difficulty ? successes - difficulty : 0;
-
                     var complications = rolls.Where(roll => roll >= complication_range).Count();
+
+                    await Airtable.Update("Roll Targets", roll_targets.Id(), new List<(string, string)> { ("Assists", (successes + assists).ToString()) });
 
                     await m.Channel.SendMessageAsync($"{m.Author.Mention} -- Rolls {rolls.Count()} d20's " +
                         $"using attribute **{attribute}** and discipline **{discipline}** " +
                         $"for character: **{character_stats.Get<string>("Character Name", "No One?")}** with a target of **{target_number}**\n\n" +
-                        $"***{(successes >= difficulty ? "SUCCESS!" : "F A I L U R E ...")}***\n\n" +
-                        $"  **{successes}** successes out of difficulty of **{difficulty}**\n" +
-                        $"  **{momentum}** momentum generated\n" +
+                        $"  **{successes}** automatic successes added to the next skill roll!\n" +
+                        $"  **{successes + assists}** total assists so far for the next skill roll\n" +
                         $"  **{complications}** complications with a complication range of **{complication_range} - 20**\n" +
                         $"Results: `[ {string.Join(" ", rolls)} ]`");
                 }
